@@ -1,0 +1,66 @@
+name: Release to development
+on:
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: release-development
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: development
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: core-api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements.lock
+      - run: python -m unittest discover -s tests -v
+      - run: docker build -t core-api:release .
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: core-api:release
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
+        with:
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Publish the scanned image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          registry="$account.dkr.ecr.$AWS_REGION.amazonaws.com"
+          tag="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+          docker tag core-api:release "$registry/$ECR_REPOSITORY:$tag"
+          docker push "$registry/$ECR_REPOSITORY:$tag"
+          digest=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=$tag" --query 'imageDetails[0].imageDigest' --output text)
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "repository=$registry/$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        id: gitops-token
+        with:
+          app-id: ${{ vars.GITOPS_APP_ID }}
+          private-key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+          owner: expertnafees-hub
+          repositories: gitops-platform-config
+      - name: Open reviewed deployment-state change
+        env:
+          GH_TOKEN: ${{ steps.gitops-token.outputs.token }}
+          IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: python scripts/promote.py
