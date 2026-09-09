@@ -1,14 +1,18 @@
-FROM python:3.13-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bd220c3e6e AS dependencies
+FROM python:3.13-alpine@sha256:7415fbc3c9e4979cc717d92377ab2bc7b2b4a2af1ac03cc52b5f3f88efedaf3a AS dependencies
 WORKDIR /build
 COPY requirements.lock .
 RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.lock
 
-FROM python:3.13-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bd220c3e6e AS runtime
+FROM python:3.13-alpine@sha256:7415fbc3c9e4979cc717d92377ab2bc7b2b4a2af1ac03cc52b5f3f88efedaf3a AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY --from=dependencies /wheels /wheels
 COPY requirements.lock .
-RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.lock     && rm -rf /wheels     && groupadd --gid 10001 app     && useradd --uid 10001 --gid 10001 --no-create-home app
+RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.lock \
+    && pip uninstall -y pip setuptools wheel \
+    && rm -rf /wheels \
+    && addgroup -g 10001 app \
+    && adduser -D -H -u 10001 -G app app
 COPY --chown=10001:10001 app.py .
 USER 10001:10001
 EXPOSE 8080
